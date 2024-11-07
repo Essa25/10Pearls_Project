@@ -19,7 +19,7 @@ Make sure you have the following installed on your machine:
 ## Backend Setup
 ### 1. Clone the repository:
 ```bash
-git clone -b master https://github.com/MuhammadEssa25/10Pearls_Project.git
+git clone -b version-2.0 https://github.com/MuhammadEssa25/10Pearls_Project.git
  cd 10Pearls_Project/
 ```
 
