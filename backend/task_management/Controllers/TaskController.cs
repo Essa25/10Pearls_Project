@@ -6,11 +6,13 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using task_management.Models;
+using System.Security.Claims;
 
 namespace task_management.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize]
     public class TaskController : ControllerBase
     {
         private readonly ApplicationDBContext _context;
@@ -21,12 +23,22 @@ namespace task_management.Controllers
         }
 
         [HttpGet]
-        [Authorize(Roles = "User, Admin")]
         public async Task<ActionResult<IEnumerable<Models.Task>>> GetTasks()
         {
             try
             {
-                return await _context.Task.Include(t => t.AssignedToUser).ToListAsync();
+                var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value);
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+
+                IQueryable<Models.Task> query = _context.Task.Include(t => t.AssignedToUser);
+
+                if (userRole != "Admin")
+                {
+                    query = query.Where(t => t.AssignedToUserId == userId);
+                }
+
+                var tasks = await query.ToListAsync();
+                return tasks;
             }
             catch (Exception ex)
             {
@@ -36,16 +48,25 @@ namespace task_management.Controllers
         }
 
         [HttpGet("{id}")]
-        [Authorize(Roles = "User, Admin")]
         public async Task<ActionResult<Models.Task>> GetTask(int id)
         {
             try
             {
-                var task = await _context.Task.Include(t => t.AssignedToUser).FirstOrDefaultAsync(t => t.Id == id);
+                var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value);
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+
+                var task = await _context.Task
+                    .Include(t => t.AssignedToUser)
+                    .FirstOrDefaultAsync(t => t.Id == id);
 
                 if (task == null)
                 {
                     return NotFound(new { error = "Task not found." });
+                }
+
+                if (userRole != "Admin" && task.AssignedToUserId != userId)
+                {
+                    return Forbid();
                 }
 
                 return task;
@@ -57,12 +78,13 @@ namespace task_management.Controllers
             }
         }
 
-        [HttpGet("count/{userId}")]
-        [Authorize(Roles = "Admin")]
-        public async Task<ActionResult<TaskCounts>> GetTaskCounts(int userId)
+        [HttpGet("count")]
+        public async Task<ActionResult<TaskCounts>> GetTaskCounts()
         {
             try
             {
+                var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value);
+
                 var counts = new TaskCounts
                 {
                     Completed = await _context.Task.CountAsync(t => t.AssignedToUserId == userId && t.Status == "Completed"),
@@ -74,7 +96,7 @@ namespace task_management.Controllers
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error retrieving task counts for user {userId}: {ex.Message}");
+                Console.WriteLine($"Error retrieving task counts: {ex.Message}");
                 return StatusCode(500, new { error = "Failed to retrieve task counts." });
             }
         }
@@ -95,7 +117,7 @@ namespace task_management.Controllers
 
             try
             {
-                task.AssignedToUser = assignedUser; 
+                task.AssignedToUser = assignedUser;
                 _context.Task.Add(task);
                 await _context.SaveChangesAsync();
 
@@ -109,9 +131,7 @@ namespace task_management.Controllers
             }
         }
 
-
         [HttpPut("{id}")]
-        [Authorize(Roles = "User, Admin")]
         public async Task<IActionResult> PutTask(int id, Models.Task task)
         {
             if (id != task.Id)
@@ -119,7 +139,30 @@ namespace task_management.Controllers
                 return BadRequest(new { error = "Task ID mismatch." });
             }
 
-            _context.Entry(task).State = EntityState.Modified;
+            var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)?.Value);
+            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+
+            var existingTask = await _context.Task.FindAsync(id);
+            if (existingTask == null)
+            {
+                return NotFound(new { error = "Task not found." });
+            }
+
+            if (userRole != "Admin" && existingTask.AssignedToUserId != userId)
+            {
+                return Forbid();
+            }
+
+            if (userRole != "Admin")
+            {
+                // Regular users can only update the status
+                existingTask.Status = task.Status;
+            }
+            else
+            {
+                // Admins can update all fields
+                _context.Entry(existingTask).CurrentValues.SetValues(task);
+            }
 
             try
             {
@@ -173,6 +216,7 @@ namespace task_management.Controllers
             return _context.Task.Any(e => e.Id == id);
         }
     }
+
     public class TaskCounts
     {
         public int Completed { get; set; }

@@ -18,132 +18,123 @@ namespace task_management.Controllers
         private readonly ApplicationDBContext _context;
         private readonly IConfiguration _configuration;
 
+        private const string AdminRole = "Admin";
+        private const string UserRole = "User";
+
         public AuthController(ApplicationDBContext context, IConfiguration configuration)
         {
-            _context = context;
+            _context = context ?? throw new ArgumentNullException(nameof(context));
             _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         }
 
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register(User user)
         {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+
+            if (await _context.User.AnyAsync(u => u.Email == user.Email))
+                return BadRequest(new { error = "Email already registered." });
+
             try
             {
-                if (!ModelState.IsValid)
-                {
-                    return BadRequest(ModelState);
-                }
-                if (await _context.User.AnyAsync(u => u.Email == user.Email))
-                {
-                    return BadRequest(new { error = "Email already registered." });
-                }
                 user.Password = BCrypt.Net.BCrypt.HashPassword(user.Password);
-                user.Role = "User"; 
+                user.Role = UserRole; // Default role
 
                 _context.User.Add(user);
                 await _context.SaveChangesAsync();
 
-
                 return CreatedAtAction(nameof(GetUser), new { id = user.Id }, new
                 {
                     message = "User created successfully.",
-                    user = new
-                    {
-                        id = user.Id,
-                        name = user.Name,
-                        email = user.Email,
-                        role = user.Role
-                    }
+                    user = new { user.Id, user.Name, user.Email, user.Role }
                 });
             }
-            catch (DbUpdateException dbEx)
+            catch (DbUpdateException)
             {
-                
-                Console.WriteLine($"Database update error: {dbEx.Message}");
                 return StatusCode(500, new { error = "An error occurred while saving to the database." });
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-            
-                Console.WriteLine($"Registration error: {ex.Message}");
                 return StatusCode(500, new { error = "An error occurred during registration." });
             }
-        }
-
-        private object GetUser()
-        {
-            throw new NotImplementedException();
         }
 
         [HttpGet("{id}")]
         public async Task<ActionResult<User>> GetUser(int id)
         {
             var user = await _context.User.FindAsync(id);
-            if (user == null)
-            {
-                return NotFound();
-            }
+            if (user == null) return NotFound();
+
             return user;
         }
 
         [HttpGet]
-            public async Task<ActionResult<IEnumerable<User>>> GetUsers()
+        public async Task<ActionResult<IEnumerable<User>>> GetUsers()
+        {
+            try
             {
-                try
-                {
-                    return await _context.User.ToListAsync();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error retrieving users: {ex.Message}");
-                    return StatusCode(500, new { error = "Failed to retrieve users." });
-                }
+                return await _context.User.ToListAsync();
             }
-    
-
+            catch (Exception)
+            {
+                return StatusCode(500, new { error = "Failed to retrieve users." });
+            }
+        }
 
         [HttpPost("login")]
         public async Task<ActionResult<string>> Login([FromBody] LoginRequest loginRequest)
         {
             if (loginRequest == null || string.IsNullOrEmpty(loginRequest.Name) || string.IsNullOrEmpty(loginRequest.Password))
-            {
                 return BadRequest("Username and password are required.");
-            }
 
             var user = await _context.User.FirstOrDefaultAsync(u => u.Name == loginRequest.Name);
             if (user == null || !BCrypt.Net.BCrypt.Verify(loginRequest.Password, user.Password))
+                return Unauthorized(new { error = "Invalid username or password." });
+
+            try
             {
-                return Unauthorized(new { error = "Invalid Username or password." });
+                var token = GenerateJwtToken(user);
+                return Ok(new { token });
             }
+            catch (Exception)
+            {
+                return StatusCode(500, new { error = "Error generating JWT token." });
+            }
+        }
 
-
+        private string GenerateJwtToken(User user)
+        {
             var key = _configuration["Jwt:Key"];
             var issuer = _configuration["Jwt:Issuer"];
             var audience = _configuration["Jwt:Audience"];
 
-
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(issuer) || string.IsNullOrEmpty(audience))
+                throw new InvalidOperationException("JWT configuration is invalid.");
+
+            var claims = new[]
             {
-                return BadRequest("JWT configuration is invalid.");
-            }
+                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+                new Claim(ClaimTypes.Name, user.Name),
+                new Claim(ClaimTypes.Role, user.Role),
+                new Claim(ClaimTypes.Email, user.Email)
+            };
 
             var tokenHandler = new JwtSecurityTokenHandler();
+            var keyBytes = Encoding.UTF8.GetBytes(key);
+            var signingKey = new SymmetricSecurityKey(keyBytes);
+            var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256Signature);
+
             var tokenDescriptor = new SecurityTokenDescriptor
             {
-                Subject = new ClaimsIdentity(new[]
-                {
-                    new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-                    new Claim(ClaimTypes.Name, user.Name),
-                    new Claim(ClaimTypes.Role, user.Role) 
-                }),
+                Subject = new ClaimsIdentity(claims),
                 Expires = DateTime.UtcNow.AddHours(1),
                 Issuer = issuer,
                 Audience = audience,
-                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)), SecurityAlgorithms.HmacSha256Signature)
+                SigningCredentials = credentials
             };
 
             var token = tokenHandler.CreateToken(tokenDescriptor);
-            return Ok(new { token = tokenHandler.WriteToken(token) });
+            return tokenHandler.WriteToken(token);
         }
     }
 
